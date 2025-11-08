@@ -70,9 +70,9 @@ public final class PaperBootstrap {
         String url;
 
         if (osArch.contains("amd64") || osArch.contains("x86_64")) {
-            url = "https://github.com/SagerNet/sing-box/releases/download/v1.8.13/sing-box-1.8.13-linux-amd64.tar.gz";
+            url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-alpha.27/sing-box-1.13.0-alpha.27-linux-amd64.tar.gz";
         } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
-            url = "https://github.com/SagerNet/sing-box/releases/download/v1.8.13/sing-box-1.8.13-linux-arm64.tar.gz";
+            url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-alpha.27/sing-box-1.13.0-alpha.27-linux-arm64.tar.gz";
         } else {
             throw new RuntimeException("不支持的架构: " + osArch);
         }
