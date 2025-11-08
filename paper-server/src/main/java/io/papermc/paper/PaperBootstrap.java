@@ -64,7 +64,18 @@ public final class PaperBootstrap {
         System.out.println(ANSI_GREEN + "config.yml 加载成功" + ANSI_RESET);
     }
 
-    // ================== 下载 sing-box ==================
+import java.io.*;
+import java.nio.file.*;
+import java.net.*;
+import java.util.*;
+import java.util.stream.*;
+
+public class SingBoxDownloader {
+    private static final String ANSI_YELLOW = "\u001B[33m";
+    private static final String ANSI_GREEN = "\u001B[32m";
+    private static final String ANSI_RED = "\u001B[31m";
+    private static final String ANSI_RESET = "\u001B[0m";
+
     private static void downloadSingBox() throws IOException, InterruptedException {
         String osArch = System.getProperty("os.arch").toLowerCase();
         String url;
@@ -91,24 +102,88 @@ public final class PaperBootstrap {
 
             // 解压
             ProcessBuilder pb = new ProcessBuilder("tar", "-xzf", tarPath.toString(), "-C", binDir.toString());
-            pb.inheritIO().start().waitFor();
+            int exitCode = pb.inheritIO().start().waitFor();
+            if (exitCode != 0) {
+                throw new RuntimeException("解压失败，退出码: " + exitCode);
+            }
 
-            // 移动可执行文件
-            Path extracted = binDir.resolve(Files.list(binDir).filter(p -> p.toString().contains("sing-box-")).findFirst().get());
-            Files.move(extracted.resolve("sing-box"), binPath, StandardCopyOption.REPLACE_EXISTING);
+            // 改进的路径查找逻辑
+            Path extractedDir = findExtractedDirectory(binDir);
+            if (extractedDir == null) {
+                throw new RuntimeException("无法找到解压后的目录");
+            }
+
+            Path sourceFile = extractedDir.resolve("sing-box");
+            if (!Files.exists(sourceFile)) {
+                // 尝试其他可能的路径
+                sourceFile = findSingBoxExecutable(extractedDir);
+                if (sourceFile == null) {
+                    throw new RuntimeException("在解压目录中找不到 sing-box 可执行文件");
+                }
+            }
+
+            System.out.println(ANSI_YELLOW + "移动文件从 " + sourceFile + " 到 " + binPath + ANSI_RESET);
+            
+            // 确保目标目录存在
+            Files.createDirectories(binPath.getParent());
+            
+            // 移动文件
+            Files.move(sourceFile, binPath, StandardCopyOption.REPLACE_EXISTING);
 
             // 清理
-            Files.walk(binDir)
-                .filter(p -> !p.equals(binPath))
-                .sorted(Comparator.reverseOrder())
-                .forEach(p -> {
-                    try { Files.delete(p); } catch (IOException ignored) {}
-                });
+            cleanupExtractedFiles(binDir, binPath);
 
-            binPath.toFile().setExecutable(true);
+            // 设置执行权限
+            if (!binPath.toFile().setExecutable(true)) {
+                System.out.println(ANSI_RED + "警告: 无法设置执行权限" + ANSI_RESET);
+            }
+
             System.out.println(ANSI_GREEN + "sing-box 下载并安装完成" + ANSI_RESET);
         }
     }
+
+    private static Path findExtractedDirectory(Path binDir) throws IOException {
+        // 查找包含 sing-box 文件的目录
+        Optional<Path> extracted = Files.list(binDir)
+            .filter(Files::isDirectory)
+            .filter(p -> p.toString().contains("sing-box"))
+            .findFirst();
+        
+        return extracted.orElse(null);
+    }
+
+    private static Path findSingBoxExecutable(Path dir) throws IOException {
+        // 递归查找 sing-box 可执行文件
+        return Files.walk(dir)
+            .filter(Files::isRegularFile)
+            .filter(p -> p.getFileName().toString().equals("sing-box"))
+            .findFirst()
+            .orElse(null);
+    }
+
+    private static void cleanupExtractedFiles(Path binDir, Path keepFile) throws IOException {
+        Files.walk(binDir)
+            .filter(p -> !p.equals(keepFile))
+            .filter(p -> !p.equals(keepFile.getParent()))
+            .sorted(Comparator.reverseOrder())
+            .forEach(p -> {
+                try { 
+                    Files.delete(p); 
+                } catch (IOException e) {
+                    System.out.println(ANSI_RED + "无法删除文件: " + p + ANSI_RESET);
+                }
+            });
+    }
+
+    public static void main(String[] args) {
+        try {
+            downloadSingBox();
+        } catch (Exception e) {
+            System.err.println(ANSI_RED + "错误: " + e.getMessage() + ANSI_RESET);
+            e.printStackTrace();
+        }
+    }
+}
 
     // ================== 生成 sing-box config.json ==================
     private static void generateSingBoxConfig() throws IOException, InterruptedException {
